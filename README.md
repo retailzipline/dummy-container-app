@@ -20,6 +20,31 @@ Minimal Go web server for testing build/deploy plumbing.
 
 Listens on `$PORT` (default `8080`).
 
+## Base images
+
+Both stages use [Docker Hardened Images](https://docs.docker.com/dhi/) from the
+`dhi.io` registry:
+
+| Stage | Image | Why |
+| --- | --- | --- |
+| builder | `dhi.io/golang:1.25-dev` | `-dev` variant runs as root and ships the Go toolchain and a shell, which the `RUN` steps need. |
+| runner | `dhi.io/static:20260909-alpine` | Minimal, no shell, no package manager, runs as nonroot `65532`. Works because the binary is fully static (`CGO_ENABLED=0`). |
+
+The `static` base is 0.25 MB against 4.13 MB for `alpine:3.22`; the final image
+is ~10 MB. `static` tags are date-stamped rather than semver — there is no
+`latest` — so bump the date deliberately when you want a newer base.
+
+Because the runner has no shell, `.version` and `.build-secret` are written in
+the **builder** stage and copied across; `RUN` is not available in the final
+stage.
+
+`dhi.io` is an authenticated registry. Log in with Docker Hub credentials before
+building:
+
+```sh
+docker login dhi.io
+```
+
 ## Build
 
 ```sh
@@ -51,6 +76,12 @@ every pull request: it builds with a `GIT_SHA` build arg and a
 reports the expected version and a non-`unknown` secret. It uses the repository
 secret `TEST_BUILD_SECRET` when one is configured, otherwise a dummy value, so
 the workflow is green without any repo setup.
+
+It also runs `docker/login-action` against `dhi.io` before building, since the
+hardened base images are not anonymously pullable. That step needs two repo
+secrets: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub PAT with read
+access). **Without them the build fails at the first `FROM`** — this is the one
+piece of required repo setup.
 
 ### Build-cache caveat
 
