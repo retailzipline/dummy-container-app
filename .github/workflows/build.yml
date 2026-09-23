@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docker:
+    name: validate image build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: dummy-container-app:ci
+          build-args: |
+            GIT_SHA=${{ steps.sha.outputs.short }}
+          secrets: |
+            TEST_BUILD_SECRET=${{ secrets.TEST_BUILD_SECRET || 'ci-dummy-secret' }}
+          # No build cache on purpose: BuildKit excludes secret values from the
+          # cache key, so a cached layer can carry a stale TEST_BUILD_SECRET and
+          # make the smoke test pass against the wrong value. A cold build here
+          # takes seconds.
+          no-cache: true
+
+      - name: Smoke test /info
+        env:
+          EXPECTED_VERSION: ${{ steps.sha.outputs.short }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8080:8080 dummy-container-app:ci
+
+          for _ in $(seq 1 30); do
+            curl -fsS localhost:8080/info >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          body=$(curl -fsS localhost:8080/info)
+          echo "$body"
+
+          version=$(echo "$body" | jq -r .version)
+          secret=$(echo "$body" | jq -r .build_secret)
+
+          if [ "$version" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version is '$version', expected '$EXPECTED_VERSION'"
+            exit 1
+          fi
+
+          if [ -z "$secret" ] || [ "$secret" = "unknown" ] || [ "$secret" = "null" ]; then
+            echo "::error::build secret was not baked into the image (got '$secret')"
+            exit 1
+          fi
+
+          echo "ok: version and build secret are present"
+
+      - name: Container logs
+        if: always()
+        run: docker logs smoke || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f smoke || true

@@ -1,0 +1,7 @@
+.git
+.gitignore
+.version
+.build-secret
+Dockerfile
+.dockerignore
+README.md
