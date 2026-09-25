@@ -81,10 +81,38 @@ jobs:
 
           echo "ok: version and build secret are present"
 
+      - name: Smoke test worker
+        run: |
+          set -euo pipefail
+          # 1s interval so the check takes seconds, not half a minute.
+          docker run -d --name worker -e WORKER_INTERVAL=1s dummy-container-app:ci worker
+          sleep 4
+          logs=$(docker logs worker 2>&1)
+          echo "$logs"
+
+          ticks=$(echo "$logs" | grep -c "stayin' alive" || true)
+          if [ "$ticks" -lt 2 ]; then
+            echo "::error::worker logged $ticks ticks in 4s, expected at least 2"
+            exit 1
+          fi
+
+          # SIGTERM must stop it promptly; `docker stop` SIGKILLs after 10s.
+          start=$(date +%s)
+          docker stop worker >/dev/null
+          elapsed=$(( $(date +%s) - start ))
+          if [ "$elapsed" -ge 10 ]; then
+            echo "::error::worker ignored SIGTERM (took ${elapsed}s, was killed)"
+            exit 1
+          fi
+
+          echo "ok: worker ticked $ticks times and stopped in ${elapsed}s"
+
       - name: Container logs
         if: always()
-        run: docker logs smoke || true
+        run: |
+          docker logs smoke || true
+          docker logs worker || true
 
       - name: Cleanup
         if: always()
-        run: docker rm -f smoke || true
+        run: docker rm -f smoke worker || true

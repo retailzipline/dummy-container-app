@@ -12,7 +12,7 @@ COPY go.mod ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/dummy-app .
 
 # Runtime data files are produced here, not in the runner: the hardened static
 # base has no shell, so RUN is impossible there. Declared after the build so a
@@ -32,9 +32,12 @@ FROM dhi.io/static:20260909-alpine AS runner
 
 WORKDIR /app
 
-COPY --from=builder /out/server /app/server
+COPY --from=builder /out/dummy-app /app/dummy-app
 COPY --from=builder /out/.version /out/.build-secret /app/
 
 EXPOSE 8080
 
-ENTRYPOINT ["/app/server"]
+# Subcommand picks the process: `server` (default) or `worker`. Override CMD
+# to run the worker: `docker run <image> worker`.
+ENTRYPOINT ["/app/dummy-app"]
+CMD ["server"]

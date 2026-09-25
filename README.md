@@ -1,6 +1,28 @@
 # dummy-container-app
 
-Minimal Go web server for testing build/deploy plumbing.
+Minimal Go app for testing container build/deploy plumbing. One binary, two
+commands.
+
+## Commands
+
+The image's entrypoint is the binary; the subcommand selects the process.
+
+| Command | What it does |
+| --- | --- |
+| `server` (default) | Serves `GET /info` on `$PORT` (default `8080`). |
+| `worker` | Logs `Ah, ha, ha, ha, stayin' alive, stayin' alive` every 5s. |
+
+```sh
+docker run --rm -p 8080:8080 dummy-container-app:latest          # server
+docker run --rm dummy-container-app:latest worker                # worker
+docker run --rm -e WORKER_INTERVAL=1s dummy-container-app:latest worker
+```
+
+`WORKER_INTERVAL` takes any Go duration (`500ms`, `5s`, `1m`). Both commands
+handle `SIGTERM`, so the container stops promptly instead of waiting out the
+runtime's grace period and being killed.
+
+An unrecognized subcommand exits 1 with a message naming the valid ones.
 
 ## Endpoint
 
