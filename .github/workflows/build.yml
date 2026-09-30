@@ -107,6 +107,22 @@ jobs:
 
           echo "ok: worker ticked $ticks times and stopped in ${elapsed}s"
 
+      - name: Smoke test job
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm -e JOB_MESSAGE='ci-job-ran' dummy-container-app:ci job 2>&1)
+          echo "$out"
+
+          if ! echo "$out" | grep -q 'ci-job-ran'; then
+            echo "::error::job did not print its message"
+            exit 1
+          fi
+
+          # Must exit 0 - `set -e` above would already have caught non-zero,
+          # but be explicit since exiting cleanly is the whole point.
+          docker run --rm dummy-container-app:ci job >/dev/null
+          echo "ok: job printed its message and exited 0"
+
       - name: Container logs
         if: always()
         run: |

@@ -115,6 +115,18 @@ func runWorker(ctx context.Context) error {
 	}
 }
 
+// runJob prints a message and returns, so the process exits 0. Models a
+// one-off task (migration, seed, init container) on a platform that runs the
+// same image with a different command.
+func runJob(_ context.Context) error {
+	msg := os.Getenv("JOB_MESSAGE")
+	if msg == "" {
+		msg = "Hasta la vista, baby"
+	}
+	log.Print(msg)
+	return nil
+}
+
 func main() {
 	// Containers get SIGTERM on stop; without this the runtime waits out its
 	// grace period and then SIGKILLs.
@@ -132,8 +144,10 @@ func main() {
 		err = runServer(ctx)
 	case "worker":
 		err = runWorker(ctx)
+	case "job":
+		err = runJob(ctx)
 	default:
-		log.Fatalf("unknown command %q (want \"server\" or \"worker\")", cmd)
+		log.Fatalf("unknown command %q (want \"server\", \"worker\" or \"job\")", cmd)
 	}
 
 	if err != nil {
