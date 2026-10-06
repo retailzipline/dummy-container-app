@@ -1,0 +1,81 @@
+name: Qovery deploy
+description: Deploy one Qovery environment at a given image tag.
+
+inputs:
+  token:
+    description: Qovery CLI access token.
+    required: true
+  organization:
+    description: Qovery organization.
+    required: true
+  project:
+    description: Qovery project.
+    required: true
+  environment:
+    description: Qovery environment to deploy.
+    required: true
+  tag:
+    description: Image tag every service is deployed at.
+    required: true
+  containers:
+    description: Comma-separated container service names; the tag is appended to each.
+    default: dummy-web-server,dummy-worker
+  lifecycles:
+    description: Comma-separated lifecycle job names; the tag is appended to each.
+    default: dummy-lifecycle-job
+  skip_lifecycle:
+    description: When 'true', omit --lifecycles entirely.
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        QOVERY_CLI_ACCESS_TOKEN: ${{ inputs.token }}
+        ORGANIZATION: ${{ inputs.organization }}
+        PROJECT: ${{ inputs.project }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        TAG: ${{ inputs.tag }}
+        CONTAINERS: ${{ inputs.containers }}
+        LIFECYCLES: ${{ inputs.lifecycles }}
+        SKIP_LIFECYCLE: ${{ inputs.skip_lifecycle }}
+      run: |
+        set -euo pipefail
+        curl -s https://get.qovery.com | bash
+
+        # Callers pass bare service names; every service runs the same image,
+        # so the one tag is appended to each.
+        with_tag() {
+          out=""
+          IFS=',' read -ra names <<< "$1"
+          for n in "${names[@]}"; do
+            [ -z "$n" ] && continue
+            [ -n "$out" ] && out+=","
+            out+="$n:$TAG"
+          done
+          printf '%s' "$out"
+        }
+
+        args=(
+          environment deploy
+          --organization "$ORGANIZATION"
+          --project "$PROJECT"
+          --environment "$ENVIRONMENT"
+          --containers "$(with_tag "$CONTAINERS")"
+        )
+
+        # Omit the flag entirely when skipping - passing it empty would still
+        # ask Qovery to deploy the lifecycle job.
+        if [ "$SKIP_LIFECYCLE" = "true" ]; then
+          note=" (lifecycle job skipped)"
+        else
+          args+=(--lifecycles "$(with_tag "$LIFECYCLES")")
+          note=""
+        fi
+
+        args+=(--watch)
+
+        qovery "${args[@]}"
+
+        echo "deployed \`$TAG\` to $ENVIRONMENT$note" >> "$GITHUB_STEP_SUMMARY"
