@@ -2,7 +2,7 @@ name: deploy
 
 # Manual deploy of a commit from main.
 #
-#   build -> staging -> [dummy-production | dummy-eu]
+#   build -> staging -> [dummy-primary | dummy-eu]
 #
 # The two production environments deploy in parallel, and only after staging
 # has succeeded. The commit must be reachable from main, so an arbitrary
@@ -162,14 +162,14 @@ jobs:
           tag: ${{ needs.build.outputs.tag }}
           skip_lifecycle: ${{ inputs.skip_lifecycle }}
 
-  # dummy-production and dummy-eu. A matrix leg runs concurrently with its
+  # dummy-primary and dummy-eu. A matrix leg runs concurrently with its
   # siblings, so both deploy in parallel once staging succeeds.
   #
   # What differs between regions is data, so it lives in this table. Add keys
   # here as they diverge (project, containers, lifecycles, ...) and read them
   # in the step as `matrix.<key> || env.<default>`; adding a region is one
   # entry. Only a leg needing its own *steps* would justify a separate job.
-  production:
+  primary:
     name: deploy ${{ matrix.environment }}
     needs: [build, staging]
     runs-on: ubuntu-latest
@@ -178,7 +178,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - environment: dummy-production
+          - environment: dummy-primary
           - environment: dummy-eu
     environment: ${{ matrix.environment }}
     steps:
