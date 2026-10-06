@@ -162,14 +162,25 @@ jobs:
           tag: ${{ needs.build.outputs.tag }}
           skip_lifecycle: ${{ inputs.skip_lifecycle }}
 
-  # production and eu are separate jobs rather than a matrix: they share no
-  # dependency on each other so they still run in parallel, and each can take
-  # its own project/cluster/service names as they diverge.
+  # dummy-production and dummy-eu. A matrix leg runs concurrently with its
+  # siblings, so both deploy in parallel once staging succeeds.
+  #
+  # What differs between regions is data, so it lives in this table. Add keys
+  # here as they diverge (project, containers, lifecycles, ...) and read them
+  # in the step as `matrix.<key> || env.<default>`; adding a region is one
+  # entry. Only a leg needing its own *steps* would justify a separate job.
   production:
-    name: deploy dummy-production
+    name: deploy ${{ matrix.environment }}
     needs: [build, staging]
     runs-on: ubuntu-latest
-    environment: dummy-production
+    strategy:
+      # One region failing must not cancel the other mid-deploy.
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dummy-production
+          - environment: dummy-eu
+    environment: ${{ matrix.environment }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/qovery-deploy
@@ -177,22 +188,6 @@ jobs:
           token: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
           organization: ${{ env.QOVERY_ORGANIZATION }}
           project: ${{ env.QOVERY_PROJECT }}
-          environment: dummy-production
-          tag: ${{ needs.build.outputs.tag }}
-          skip_lifecycle: ${{ inputs.skip_lifecycle }}
-
-  eu:
-    name: deploy dummy-eu
-    needs: [build, staging]
-    runs-on: ubuntu-latest
-    environment: dummy-eu
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: ./.github/actions/qovery-deploy
-        with:
-          token: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
-          organization: ${{ env.QOVERY_ORGANIZATION }}
-          project: ${{ env.QOVERY_PROJECT }}
-          environment: dummy-eu
+          environment: ${{ matrix.environment }}
           tag: ${{ needs.build.outputs.tag }}
           skip_lifecycle: ${{ inputs.skip_lifecycle }}
