@@ -19,6 +19,10 @@ on:
         description: 'Deploy to staging'
         type: boolean
         default: false
+      skip_lifecycle:
+        description: 'Skip lifecycle job (i.e. migration)'
+        type: boolean
+        default: false
 
 # One run per PR; a newer dispatch supersedes an older one.
 concurrency:
@@ -151,17 +155,31 @@ jobs:
         env:
           QOVERY_CLI_ACCESS_TOKEN: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
           TAG: ${{ needs.build.outputs.tag }}
+          SKIP_LIFECYCLE: ${{ inputs.skip_lifecycle }}
         run: |
           set -euo pipefail
           curl -s https://get.qovery.com | bash
 
-          # All three services run the same image, so they share one tag.
-          qovery environment deploy \
-            --organization "$QOVERY_ORGANIZATION" \
-            --project "$QOVERY_PROJECT" \
-            --environment "$QOVERY_ENVIRONMENT" \
-            --containers "dummy-web-server:$TAG,dummy-worker:$TAG" \
-            --lifecycles "dummy-lifecycle-job:$TAG" \
-            --watch
+          # Every service runs the same image, so they share one tag.
+          args=(
+            environment deploy
+            --organization "$QOVERY_ORGANIZATION"
+            --project "$QOVERY_PROJECT"
+            --environment "$QOVERY_ENVIRONMENT"
+            --containers "dummy-web-server:$TAG,dummy-worker:$TAG"
+          )
 
-          echo "deployed \`${IMAGE}:${TAG}\` to $QOVERY_ENVIRONMENT" >> "$GITHUB_STEP_SUMMARY"
+          # Omit the flag entirely when skipping - passing it empty would still
+          # ask Qovery to deploy the lifecycle job.
+          if [ "$SKIP_LIFECYCLE" = "true" ]; then
+            note=" (lifecycle job skipped)"
+          else
+            args+=(--lifecycles "dummy-lifecycle-job:$TAG")
+            note=""
+          fi
+
+          args+=(--watch)
+
+          qovery "${args[@]}"
+
+          echo "deployed \`${IMAGE}:${TAG}\` to $QOVERY_ENVIRONMENT$note" >> "$GITHUB_STEP_SUMMARY"
