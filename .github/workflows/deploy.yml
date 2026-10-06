@@ -31,6 +31,9 @@ permissions:
 
 env:
   IMAGE: diorman/dummy-container-app
+  QOVERY_ORGANIZATION: Zipline
+  QOVERY_PROJECT: diorman-project
+  QOVERY_ENVIRONMENT: dummy-staging
 
 jobs:
   build:
@@ -152,13 +155,13 @@ jobs:
           set -euo pipefail
           curl -s https://get.qovery.com | bash
 
-          # TODO: replace with the real command.
-          # qovery environment deploy \
-          #   --organization "${{ vars.QOVERY_ORGANIZATION }}" \
-          #   --project "${{ vars.QOVERY_PROJECT }}" \
-          #   --environment "staging" \
-          #   --tag "$TAG" \
-          #   --watch
-          echo "PLACEHOLDER: deploy staging at ${IMAGE}:${TAG}"
+          # All three services run the same image, so they share one tag.
+          qovery-cli environment deploy \
+            --organization "$QOVERY_ORGANIZATION" \
+            --project "$QOVERY_PROJECT" \
+            --environment "$QOVERY_ENVIRONMENT" \
+            --containers "dummy-web-server:$TAG,dummy-worker:$TAG" \
+            --lifecycles "dummy-lifecycle-job:$TAG" \
+            --watch
 
-          echo "deployed \`${IMAGE}:${TAG}\` to staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "deployed \`${IMAGE}:${TAG}\` to $QOVERY_ENVIRONMENT" >> "$GITHUB_STEP_SUMMARY"
