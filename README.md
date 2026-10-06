@@ -124,3 +124,5 @@ TEST_BUILD_SECRET=rotated docker buildx build --build-arg GIT_SHA=abc1234 ...
 In practice `GIT_SHA` changes per commit and invalidates the chain, but CI runs
 with `no-cache: true` so a stale layer can never satisfy the smoke test. Locally,
 pass `--no-cache` (or change `GIT_SHA`) when rotating the secret.
+
+DUMMY CHANGE
