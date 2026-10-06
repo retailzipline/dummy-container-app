@@ -1,0 +1,164 @@
+name: deploy
+
+# Manual PR build, optionally deployed to staging.
+#
+#   build -> [staging]
+#
+# The PR number resolves to the PR's *head* SHA - never refs/pull/N/merge,
+# which is a synthetic merge commit that exists in no branch. The image is
+# tagged pr-<number>-<head sha> and staging deploys that exact tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number (e.g. 42)'
+        type: string
+        required: true
+      staging:
+        description: 'Deploy to staging'
+        type: boolean
+        default: false
+
+# One run per PR; a newer dispatch supersedes an older one.
+concurrency:
+  group: deploy-pr-${{ inputs.pr }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  IMAGE: diorman/dummy-container-app
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+      tag: ${{ steps.pr.outputs.tag }}
+    steps:
+      - name: Resolve PR head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$PR" | grep -qE '^[0-9]+$'; then
+            echo "::error::'$PR' is not a PR number"
+            exit 1
+          fi
+
+          if ! pr=$(gh api "repos/$REPO/pulls/$PR" 2>/dev/null); then
+            echo "::error::PR #$PR does not exist in $REPO"
+            exit 1
+          fi
+
+          state=$(printf '%s' "$pr" | jq -r .state)
+          if [ "$state" != "open" ]; then
+            echo "::error::PR #$PR is $state; only open PRs can be built"
+            exit 1
+          fi
+
+          # .head.sha is the PR branch tip, which is what we ship.
+          sha=$(printf '%s' "$pr" | jq -r .head.sha)
+          head_ref=$(printf '%s' "$pr" | jq -r .head.ref)
+          tag="pr-$PR-$sha"
+
+          {
+            echo "sha=$sha"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### PR #$PR"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| branch | \`$head_ref\` |"
+            echo "| head sha | \`$sha\` |"
+            echo "| image | \`$IMAGE:$tag\` |"
+            echo "| staging | ${{ inputs.staging }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The resolved head, not the merge ref.
+          ref: ${{ steps.pr.outputs.sha }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to dhi.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Placed after the Docker Hub login so a private repo answers correctly;
+      # without auth a missing tag and an unauthorized one look identical.
+      - name: Skip build if tag already pushed
+        id: exists
+        env:
+          TAG: ${{ steps.pr.outputs.tag }}
+        run: |
+          if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "\`$IMAGE:$TAG\` already pushed — build skipped" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.exists.outputs.skip != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.pr.outputs.tag }}
+          build-args: |
+            GIT_SHA=${{ steps.pr.outputs.sha }}
+          secrets: |
+            TEST_BUILD_SECRET=${{ secrets.TEST_BUILD_SECRET || 'ci-dummy-secret' }}
+          # See build.yml: BuildKit keeps secret values out of the cache key,
+          # so a cached layer can carry a stale TEST_BUILD_SECRET.
+          no-cache: true
+
+  staging:
+    name: deploy staging
+    needs: build
+    if: inputs.staging
+    runs-on: ubuntu-latest
+    # Not needed for secrets (those are repo-level); this is purely so the
+    # deploy shows up in the repo's Deployments view. No protection rules.
+    environment: staging
+    steps:
+      - name: Deploy to Qovery (staging)
+        env:
+          QOVERY_CLI_ACCESS_TOKEN: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          curl -s https://get.qovery.com | bash
+
+          # TODO: replace with the real command.
+          # qovery environment deploy \
+          #   --organization "${{ vars.QOVERY_ORGANIZATION }}" \
+          #   --project "${{ vars.QOVERY_PROJECT }}" \
+          #   --environment "staging" \
+          #   --tag "$TAG" \
+          #   --watch
+          echo "PLACEHOLDER: deploy staging at ${IMAGE}:${TAG}"
+
+          echo "deployed \`${IMAGE}:${TAG}\` to staging" >> "$GITHUB_STEP_SUMMARY"
