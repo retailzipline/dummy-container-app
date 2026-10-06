@@ -1,34 +1,195 @@
 name: deploy
 
-# Manual PR build, optionally deployed to staging.
+# Manual deploy of a commit from main.
 #
-#   build -> [staging]
+#   build -> staging -> [dummy-production | dummy-eu]
 #
-# The PR number resolves to the PR's *head* SHA - never refs/pull/N/merge,
-# which is a synthetic merge commit that exists in no branch. The image is
-# tagged pr-<number>-<head sha> and staging deploys that exact tag.
+# The two production environments deploy in parallel, and only after staging
+# has succeeded. The commit must be reachable from main, so an arbitrary
+# repository commit cannot be promoted to production.
 
 on:
   workflow_dispatch:
     inputs:
-      pr:
-        description: 'PR number (e.g. 42)'
+      sha:
+        description: 'Commit SHA on main (HEAD = tip of main)'
         type: string
+        default: HEAD
         required: true
-      staging:
-    name: deploy staging
+      skip_lifecycle:
+        description: 'Skip lifecycle job (i.e. migration)'
+        type: boolean
+        default: false
+
+# Serialize deploys from main. cancel-in-progress is deliberately false: a
+# newer dispatch should queue, never interrupt a production deploy mid-flight.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: diorman/dummy-container-app
+  QOVERY_ORGANIZATION: Zipline
+  QOVERY_PROJECT: diorman-project
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+
+          case "$INPUT" in
+            HEAD|head|main|"")
+              sha=$(gh api "repos/$REPO/commits/main" --jq .sha)
+              source="tip of main"
+              ;;
+            *)
+              # Must be a real commit...
+              if ! sha=$(gh api "repos/$REPO/commits/$INPUT" --jq .sha 2>/dev/null); then
+                echo "::error::'$INPUT' is not a commit in $REPO"
+                exit 1
+              fi
+
+              # ...and reachable from main. Comparing main...<sha> gives
+              # 'identical' for main's tip and 'behind' for an ancestor;
+              # anything else means the commit lives outside main's history.
+              status=$(gh api "repos/$REPO/compare/main...$sha" --jq .status)
+              case "$status" in
+                identical|behind) ;;
+                *)
+                  echo "::error::commit $sha is not reachable from main (compare status: $status)"
+                  exit 1
+                  ;;
+              esac
+              source="commit on main"
+              ;;
+          esac
+
+          tag="main-$sha"
+
+          {
+            echo "sha=$sha"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Deploying from main"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| requested | \`$INPUT\` |"
+            echo "| resolved | $source |"
+            echo "| sha | \`$sha\` |"
+            echo "| image | \`$IMAGE:$tag\` |"
+            echo "| skip lifecycle | ${{ inputs.skip_lifecycle }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to dhi.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Placed after the Docker Hub login so a private repo answers correctly;
+      # without auth a missing tag and an unauthorized one look identical.
+      - name: Skip build if tag already pushed
+        id: exists
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "\`$IMAGE:$TAG\` already pushed — build skipped" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.exists.outputs.skip != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.resolve.outputs.tag }}
+          build-args: |
+            GIT_SHA=${{ steps.resolve.outputs.sha }}
+          secrets: |
+            TEST_BUILD_SECRET=${{ secrets.TEST_BUILD_SECRET || 'ci-dummy-secret' }}
+          # See build.yml: BuildKit keeps secret values out of the cache key,
+          # so a cached layer can carry a stale TEST_BUILD_SECRET.
+          no-cache: true
+
+  staging:
+    name: deploy dummy-staging
     needs: build
-    if: inputs.staging
     runs-on: ubuntu-latest
     environment: dummy-staging
     steps:
-      # Needed so the local composite action below is on disk.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/qovery-deploy
         with:
           token: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
           organization: ${{ env.QOVERY_ORGANIZATION }}
           project: ${{ env.QOVERY_PROJECT }}
-          environment: ${{ env.QOVERY_ENVIRONMENT }}
+          environment: dummy-staging
+          tag: ${{ needs.build.outputs.tag }}
+          skip_lifecycle: ${{ inputs.skip_lifecycle }}
+
+  # dummy-production and dummy-eu. A matrix leg runs concurrently with its
+  # siblings, so both deploy in parallel once staging succeeds.
+  #
+  # What differs between regions is data, so it lives in this table. Add keys
+  # here as they diverge (project, containers, lifecycles, ...) and read them
+  # in the step as `matrix.<key> || env.<default>`; adding a region is one
+  # entry. Only a leg needing its own *steps* would justify a separate job.
+  production:
+    name: deploy ${{ matrix.environment }}
+    needs: [build, staging]
+    runs-on: ubuntu-latest
+    strategy:
+      # One region failing must not cancel the other mid-deploy.
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dummy-production
+          - environment: dummy-eu
+    environment: ${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/qovery-deploy
+        with:
+          token: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
+          # Per-region overrides come from the matrix table; the env block
+          # supplies the default when a leg does not set one.
+          organization: ${{ matrix.organization || env.QOVERY_ORGANIZATION }}
+          project: ${{ matrix.project || env.QOVERY_PROJECT }}
+          environment: ${{ matrix.environment }}
           tag: ${{ needs.build.outputs.tag }}
           skip_lifecycle: ${{ inputs.skip_lifecycle }}
