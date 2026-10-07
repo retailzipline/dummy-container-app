@@ -2,11 +2,12 @@ name: deploy
 
 # Manual deploy of a commit from main.
 #
-#   build -> staging -> [dummy-primary | dummy-eu]
+#   build -> [staging] -> [dummy-primary | dummy-eu]
 #
-# The two production environments deploy in parallel, and only after staging
-# has succeeded. The commit must be reachable from main, so an arbitrary
-# repository commit cannot be promoted to production.
+# Each target is opt-in. dummy-primary and dummy-eu run in parallel, and wait
+# for staging only when staging was selected. With no target selected this
+# just builds and pushes. The commit must be reachable from main, so an
+# arbitrary repository commit cannot be promoted to production.
 
 on:
   workflow_dispatch:
@@ -16,6 +17,18 @@ on:
         type: string
         default: HEAD
         required: true
+      staging:
+        description: 'Deploy to dummy-staging'
+        type: boolean
+        default: false
+      primary:
+        description: 'Deploy to dummy-primary'
+        type: boolean
+        default: false
+      eu:
+        description: 'Deploy to dummy-eu'
+        type: boolean
+        default: false
       skip_lifecycle:
         description: 'Skip lifecycle job (i.e. migration)'
         type: boolean
@@ -149,6 +162,7 @@ jobs:
   staging:
     name: deploy dummy-staging
     needs: build
+    if: inputs.staging
     runs-on: ubuntu-latest
     environment: dummy-staging
     steps:
@@ -162,34 +176,53 @@ jobs:
           tag: ${{ needs.build.outputs.tag }}
           skip_lifecycle: ${{ inputs.skip_lifecycle }}
 
-  # dummy-primary and dummy-eu. A matrix leg runs concurrently with its
-  # siblings, so both deploy in parallel once staging succeeds.
-  #
-  # What differs between regions is data, so it lives in this table. Add keys
-  # here as they diverge (project, containers, lifecycles, ...) and read them
-  # in the step as `matrix.<key> || env.<default>`; adding a region is one
-  # entry. Only a leg needing its own *steps* would justify a separate job.
+  # dummy-primary and dummy-eu depend only on build and staging, never on
+  # each other, so they deploy in parallel.
+
   primary:
-    name: deploy ${{ matrix.environment }}
+    name: deploy dummy-primary
     needs: [build, staging]
+    # always() so this is still evaluated when staging is skipped. build must
+    # be an outright success - without that check a failed build would still
+    # deploy - and staging must have succeeded or not run at all.
+    if: >-
+      always()
+      && inputs.primary
+      && needs.build.result == 'success'
+      && (needs.staging.result == 'success' || needs.staging.result == 'skipped')
     runs-on: ubuntu-latest
-    strategy:
-      # One region failing must not cancel the other mid-deploy.
-      fail-fast: false
-      matrix:
-        include:
-          - environment: dummy-primary
-          - environment: dummy-eu
-    environment: ${{ matrix.environment }}
+    environment: dummy-primary
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/qovery-deploy
         with:
           token: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
-          # Per-region overrides come from the matrix table; the env block
-          # supplies the default when a leg does not set one.
-          organization: ${{ matrix.organization || env.QOVERY_ORGANIZATION }}
-          project: ${{ matrix.project || env.QOVERY_PROJECT }}
-          environment: ${{ matrix.environment }}
+          organization: ${{ env.QOVERY_ORGANIZATION }}
+          project: ${{ env.QOVERY_PROJECT }}
+          environment: dummy-primary
+          tag: ${{ needs.build.outputs.tag }}
+          skip_lifecycle: ${{ inputs.skip_lifecycle }}
+
+  eu:
+    name: deploy dummy-eu
+    needs: [build, staging]
+    # always() so this is still evaluated when staging is skipped. build must
+    # be an outright success - without that check a failed build would still
+    # deploy - and staging must have succeeded or not run at all.
+    if: >-
+      always()
+      && inputs.eu
+      && needs.build.result == 'success'
+      && (needs.staging.result == 'success' || needs.staging.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: dummy-eu
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/qovery-deploy
+        with:
+          token: ${{ secrets.QOVERY_CLI_ACCESS_TOKEN }}
+          organization: ${{ env.QOVERY_ORGANIZATION }}
+          project: ${{ env.QOVERY_PROJECT }}
+          environment: dummy-eu
           tag: ${{ needs.build.outputs.tag }}
           skip_lifecycle: ${{ inputs.skip_lifecycle }}
